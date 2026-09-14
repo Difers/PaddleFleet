@@ -43,6 +43,9 @@ repos:
           (?x)^(
             src/paddlefleet/(cli|data|datasets|mergekit|nn|peft|quantization|trainer|transformers|triton_kernels)/|
             src/paddlefleet/utils/(?!_fleet_utils\.py)|
+            docs/|
+            examples/|
+            scripts/(regression|unit_test)/|
             test/formers/
           )
   # For Python files
@@ -53,7 +56,6 @@ repos:
         args: [--fix, --exit-non-zero-on-fix, --no-cache]
         exclude: *paddleformers_derived
       - id: ruff-format
-        exclude: *paddleformers_derived
   # For C++ files
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v21.1.7
