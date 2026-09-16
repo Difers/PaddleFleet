@@ -41,6 +41,7 @@ from unittest import mock
 import numpy as np
 import paddle
 
+from paddlefleet.fusions.fused_mhc_kernels import is_cutile_available
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.recompute_utils import (
     mhc_recompute_block_plan,
@@ -629,6 +630,12 @@ class TestLayerLevelBlockRecompute(unittest.TestCase):
         _MHC_RECOMPUTE_MANAGERS.clear()
 
     def _build(self, **overrides):
+        # The fused kernels are cuTile stubs that raise at call time when cuTile
+        # is not installed; skip rather than fail on a CUDA box without it, the
+        # same gate the other fused mHC tests use. The native path (the default)
+        # runs everywhere.
+        if overrides.get("use_fused_mhc") and not is_cutile_available():
+            self.skipTest("cuTile unavailable, fused mHC kernels are stubs")
         config = _make_config(num_hidden_layers=2, **overrides)
         model_parallel_cuda_manual_seed(42, tp_rank=0, ep_rank=0, etp_rank=0)
         paddle.seed(42)
@@ -718,9 +725,9 @@ class TestLayerLevelBlockRecompute(unittest.TestCase):
         collected = []
         real_add = RecomputeWithoutOutputManager.add
 
-        def spy(manager, recompute):
+        def spy(manager, recompute, *args, **kwargs):
             collected.append(recompute)
-            return real_add(manager, recompute)
+            return real_add(manager, recompute, *args, **kwargs)
 
         layers = self._build(
             recompute_granularity="selective",
@@ -766,9 +773,9 @@ class TestLayerLevelBlockRecompute(unittest.TestCase):
         collected = []
         real_add = RecomputeWithoutOutputManager.add
 
-        def spy(manager, recompute):
+        def spy(manager, recompute, *args, **kwargs):
             collected.append(recompute)
-            return real_add(manager, recompute)
+            return real_add(manager, recompute, *args, **kwargs)
 
         layers = self._build(
             recompute_granularity="selective",
@@ -1138,14 +1145,14 @@ class TestLayerLevelBlockRecompute(unittest.TestCase):
         shapes = {}
         real_add = RecomputeWithoutOutputManager.add
 
-        def spy(manager, recompute_unit):
+        def spy(manager, recompute_unit, *args, **kwargs):
             # Recorded here rather than after the run: _recompute drops
             # ``outputs`` once it has replayed.
             for output in recompute_unit.outputs:
                 if output is not None:
                     key = tuple(output.shape)
                     shapes[key] = shapes.get(key, 0) + 1
-            return real_add(manager, recompute_unit)
+            return real_add(manager, recompute_unit, *args, **kwargs)
 
         with mock.patch.object(RecomputeWithoutOutputManager, "add", spy):
             blocked = self._run(layers, x_np)
