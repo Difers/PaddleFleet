@@ -44,6 +44,7 @@ import paddle
 from paddlefleet.fusions.fused_mhc_kernels import is_cutile_available
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.recompute_utils import (
+    mhc_chunk_layout_text,
     mhc_recompute_block_plan,
     validate_recompute_modules,
 )
@@ -445,6 +446,89 @@ class TestBlockPlan(unittest.TestCase):
         block, end = mhc_recompute_block_plan(0, config, is_mtp_layer=True)
         self.assertEqual(block, ("mtp", 0))
         self.assertTrue(end)
+
+
+class TestChunkLayoutText(unittest.TestCase):
+    """``mhc_chunk_layout_text``: the human-readable layout printed in the
+    cross-chunk error. Covers the empty head/tail note branch."""
+
+    def test_no_empty_layers_omits_the_note(self):
+        text = mhc_chunk_layout_text(_PlanConfig(8, pp=2))
+        self.assertIn("8 backbone layers", text)
+        self.assertIn("chunk 0: layers 0-", text)
+        self.assertNotIn("empty", text)
+
+    def test_empty_head_and_tail_are_annotated(self):
+        # 4 backbone + 2 head + 3 tail; the note must list both.
+        text = mhc_chunk_layout_text(_PlanConfig(4, pp=2, head=2, tail=3))
+        self.assertIn("2 empty head", text)
+        self.assertIn("3 empty tail", text)
+        self.assertIn("take up chunk slots", text)
+
+    def test_only_tail_empty(self):
+        text = mhc_chunk_layout_text(_PlanConfig(4, pp=1, tail=1))
+        self.assertIn("1 empty tail", text)
+        self.assertNotIn("empty head", text)
+
+
+class TestBlockReleaseLog(unittest.TestCase):
+    """``_log_block_release``: one-shot memory-release probe fired the first
+    time a block discards its span outputs."""
+
+    def setUp(self):
+        import paddlefleet.tensor_parallel.random as R
+
+        self._R = R
+        self._saved = R._release_logged
+        R._release_logged = False
+
+    def tearDown(self):
+        self._R._release_logged = self._saved
+        _MHC_RECOMPUTE_MANAGERS.clear()
+
+    def _one_span(self, out):
+        span = RecomputeWithoutOutput()
+        # minimal stand-in: an object whose ``outputs`` the log walks and whose
+        # ``_discard_outputs`` the fallback path calls.
+        span.outputs = (out,)
+        return span
+
+    def test_first_block_discard_logs_and_is_one_shot(self):
+        mgr = RecomputeWithoutOutputManager()
+        a = paddle.randn([256, 256], dtype="float32")
+        mgr.add(self._one_span(a), "L0 aggregate")
+        hook = paddle.ones([4], dtype="float32")
+        hook.stop_gradient = False
+
+        with self.assertLogs(
+            "paddlefleet.tensor_parallel.random", "INFO"
+        ) as cm:
+            mgr.discard_all_outputs_and_register_unified_recompute(hook)
+        self.assertIn("MHC-RECOMPUTE-RELEASE", "\n".join(cm.output))
+        self.assertTrue(self._R._release_logged)
+
+        # Second block must NOT log again (one-shot guard). Capture records
+        # directly: assertLogs would itself raise when nothing is logged.
+        import logging
+
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        logger = logging.getLogger("paddlefleet.tensor_parallel.random")
+        logger.addHandler(handler)
+        try:
+            mgr2 = RecomputeWithoutOutputManager()
+            b = paddle.randn([256, 256], dtype="float32")
+            mgr2.add(self._one_span(b), "L1 aggregate")
+            hook2 = paddle.ones([4], dtype="float32")
+            hook2.stop_gradient = False
+            mgr2.discard_all_outputs_and_register_unified_recompute(hook2)
+        finally:
+            logger.removeHandler(handler)
+        self.assertEqual(
+            [r for r in records if "MHC-RECOMPUTE-RELEASE" in r.getMessage()],
+            [],
+        )
 
 
 class _ValidateConfig:
